@@ -4,8 +4,10 @@ namespace Shopmade\Shop\Http\Controllers\Shop;
 
 use App\Http\Controllers\Controller;
 use App\Models\Customer;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\View\View;
@@ -13,8 +15,11 @@ use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Mail\OrderConfirmation;
 use Shopmade\Shop\Models\Order;
 use Shopmade\Shop\Models\OrderItem;
+use Shopmade\Shop\Models\Product;
 use Shopmade\Shop\Services\Cart;
+use Shopmade\Shop\Services\OutOfStock;
 use Shopmade\Shop\Services\StripeCheckout;
+use Throwable;
 
 class CheckoutController extends Controller
 {
@@ -56,36 +61,13 @@ class CheckoutController extends Controller
 
         $lines = $cart->lines();
 
-        foreach ($lines as $line) {
-            if (! $line['product']->isInStock($line['qty'])) {
-                return back()->withErrors(['cart' => 'Not enough stock for '.$line['product']->name.'.']);
-            }
+        try {
+            $order = $this->placeOrder($data, $lines, $cart->total());
+        } catch (OutOfStock $exception) {
+            return back()->withInput()->withErrors(['cart' => 'Not enough stock for '.$exception->getMessage().'.']);
         }
 
-        $order = DB::transaction(function () use ($data, $lines, $cart) {
-            $order = Order::query()->create([
-                ...$data,
-                'status' => OrderStatus::New,
-                'total' => $cart->total(),
-            ]);
-
-            foreach ($lines as $line) {
-                OrderItem::query()->create([
-                    'order_id' => $order->id,
-                    'product_id' => $line['product']->id,
-                    'name' => $line['product']->name,
-                    'unit_price' => $line['product']->price,
-                    'qty' => $line['qty'],
-                    'line_total' => $line['line_total'],
-                ]);
-
-                $line['product']->decrementStock($line['qty']);
-            }
-
-            $cart->clear();
-
-            return $order;
-        });
+        $cart->clear();
 
         $this->sendConfirmationMail($order);
 
@@ -109,12 +91,48 @@ class CheckoutController extends Controller
         return (bool) $request->user()?->canManageCoreTool('orders');
     }
 
+    /**
+     * Creates the order and takes stock in one transaction. A clash on the order number is retried.
+     *
+     * @param  array<string, mixed>  $data
+     * @param  Collection<int, array{product: Product, qty: int, line_total: float}>  $lines
+     *
+     * @throws OutOfStock
+     */
+    private function placeOrder(array $data, Collection $lines, float $total): Order
+    {
+        return retry(3, fn (): Order => DB::transaction(function () use ($data, $lines, $total): Order {
+            $order = new Order($data);
+            $order->forceFill(['customer_id' => $data['customer_id'] ?? null, 'status' => OrderStatus::New, 'total' => $total])->save();
+
+            foreach ($lines as $line) {
+                if (! $line['product']->decrementStock($line['qty'])) {
+                    throw new OutOfStock($line['product']->name);
+                }
+
+                OrderItem::query()->create([
+                    'order_id' => $order->id,
+                    'product_id' => $line['product']->id,
+                    'name' => $line['product']->name,
+                    'unit_price' => $line['product']->price,
+                    'qty' => $line['qty'],
+                    'line_total' => $line['line_total'],
+                ]);
+            }
+
+            return $order;
+        }), when: fn (Throwable $exception): bool => $exception instanceof UniqueConstraintViolationException);
+    }
+
+    /**
+     * The order is already saved: a mail failure is logged, never shown to the buyer as a failed checkout.
+     */
     private function sendConfirmationMail(Order $order): void
     {
-        if (in_array(config('mail.default'), ['log'], true)) {
-            return;
+        try {
+            Mail::to($order->guest_email)->send(new OrderConfirmation($order));
+        } catch (Throwable $exception) {
+            report($exception);
         }
-
-        Mail::to($order->guest_email)->send(new OrderConfirmation($order));
     }
 }

@@ -21,7 +21,7 @@
                             <span class="sm-shop-card-name">{{ $product->name }}</span>
                             <span class="sm-shop-card-desc">{{ Str::limit($product->description, 80) }}</span>
                             <span class="sm-shop-card-foot">
-                                <span class="sm-shop-price">${{ number_format($product->price, 2) }}</span>
+                                <span class="sm-shop-price">{{ \Shopmade\Shop\Support\Money::format($product->price) }}</span>
                                 <span class="sm-shop-card-cta" aria-hidden="true">View &rarr;</span>
                             </span>
                         </span>

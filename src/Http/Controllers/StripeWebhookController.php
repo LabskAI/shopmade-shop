@@ -3,6 +3,7 @@
 namespace Shopmade\Shop\Http\Controllers;
 
 use App\Http\Controllers\Controller;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Shopmade\Shop\Services\StripeCheckout;
@@ -17,7 +18,15 @@ class StripeWebhookController extends Controller
             return response('Invalid signature', 400);
         }
 
-        if ($stripe->handleWebhookPayload($request->json()->all(), $signed)) {
+        try {
+            $handled = $stripe->handleWebhookPayload($request->json()->all(), $signed);
+        } catch (RequestException $exception) {
+            report($exception);
+
+            return response('Stripe lookup failed', 500);
+        }
+
+        if ($handled) {
             return response('OK', 200);
         }
 

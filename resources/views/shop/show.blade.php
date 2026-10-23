@@ -20,7 +20,7 @@
             @if ($product->image_url)
                 <span class="sm-shop-tag">{{ $product->type->label() }}</span>
             @endif
-            <p class="sm-shop-price sm-shop-price-lg">${{ number_format($product->price, 2) }}</p>
+            <p class="sm-shop-price sm-shop-price-lg">{{ \Shopmade\Shop\Support\Money::format($product->price) }}</p>
             @if ($product->image_url)
                 <p class="sm-shop-body">{{ $product->description }}</p>
             @endif

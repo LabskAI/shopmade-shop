@@ -23,7 +23,7 @@
                 </div>
                 <div>
                     <dt class="text-label text-ink/70">Price</dt>
-                    <dd>${{ number_format($product->price, 2) }}</dd>
+                    <dd>{{ \Shopmade\Shop\Support\Money::format($product->price) }}</dd>
                 </div>
                 <div>
                     <dt class="text-label text-ink/70">SKU</dt>

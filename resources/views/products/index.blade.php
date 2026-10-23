@@ -25,7 +25,7 @@
                 <tr class="border-b border-line-soft">
                     <td class="px-4 py-3 text-control"><a href="{{ route('products.show', $product) }}">{{ $product->name }}</a></td>
                     <td class="px-4 py-3 text-control text-ink/70">{{ $product->type->label() }}</td>
-                    <td class="px-4 py-3 text-right text-control tabular-nums">${{ number_format($product->price, 2) }}</td>
+                    <td class="px-4 py-3 text-right text-control tabular-nums">{{ \Shopmade\Shop\Support\Money::format($product->price) }}</td>
                     <td class="px-4 py-3 text-control text-ink/70">{{ $product->stock ?? 'Unlimited' }}</td>
                     <td class="px-4 py-3"><x-status :state="$product->active ? 'active' : 'disabled'" /></td>
                 </tr>

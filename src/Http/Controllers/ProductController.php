@@ -76,10 +76,12 @@ class ProductController extends Controller
      */
     private function validated(Request $request, ?Product $product = null): array
     {
+        $request->merge(['slug' => Str::slug((string) ($request->filled('slug') ? $request->input('slug') : $request->input('name')))]);
+
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'slug' => [
-                'nullable',
+                'required',
                 'string',
                 'max:255',
                 Rule::unique('products', 'slug')->ignore($product),
@@ -92,10 +94,6 @@ class ProductController extends Controller
             'stock' => ['nullable', 'integer', 'min:0'],
             'active' => ['sometimes', 'boolean'],
         ]);
-
-        $data['slug'] = filled($data['slug'] ?? null)
-            ? Str::slug($data['slug'])
-            : Str::slug($data['name']);
 
         $data['active'] = $request->boolean('active');
 

@@ -67,12 +67,12 @@
             <h2 class="sm-shop-h3" id="summary-title">Order summary</h2>
             <ul class="sm-shop-sum-lines" role="list">
                 @foreach ($lines as $line)
-                    <li><span>{{ $line['product']->name }} × {{ $line['qty'] }}</span><span class="sm-shop-num">${{ number_format($line['line_total'], 2) }}</span></li>
+                    <li><span>{{ $line['product']->name }} × {{ $line['qty'] }}</span><span class="sm-shop-num">{{ \Shopmade\Shop\Support\Money::format($line['line_total']) }}</span></li>
                 @endforeach
             </ul>
             <div class="sm-shop-total">
                 <span>Total</span>
-                <span class="sm-shop-price">${{ number_format($total, 2) }}</span>
+                <span class="sm-shop-price">{{ \Shopmade\Shop\Support\Money::format($total) }}</span>
             </div>
         </aside>
     </div>

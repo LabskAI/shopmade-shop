@@ -46,15 +46,15 @@
                         <tr class="border-b border-line-soft">
                             <td class="px-4 py-3 text-control">{{ $item->name }}</td>
                             <td class="px-4 py-3 text-control tabular-nums">{{ $item->qty }}</td>
-                            <td class="px-4 py-3 text-control tabular-nums">${{ number_format($item->unit_price, 2) }}</td>
-                            <td class="px-4 py-3 text-right text-control tabular-nums">${{ number_format($item->line_total, 2) }}</td>
+                            <td class="px-4 py-3 text-control tabular-nums">{{ \Shopmade\Shop\Support\Money::format($item->unit_price) }}</td>
+                            <td class="px-4 py-3 text-right text-control tabular-nums">{{ \Shopmade\Shop\Support\Money::format($item->line_total) }}</td>
                         </tr>
                     @endforeach
                 </tbody>
                 <tfoot>
                     <tr>
                         <td colspan="3" class="px-4 pt-4 text-right text-control">Total</td>
-                        <td class="px-4 pt-4 text-right text-card-title tabular-nums">${{ number_format($order->total, 2) }}</td>
+                        <td class="px-4 pt-4 text-right text-card-title tabular-nums">{{ \Shopmade\Shop\Support\Money::format($order->total) }}</td>
                     </tr>
                 </tfoot>
             </table>
@@ -92,7 +92,7 @@
                 </x-card>
             @endif
             <x-card title="Public order link">
-                <p class="text-body text-ink/70">Share with the buyer until email is wired:</p>
+                <p class="text-body text-ink/70">The buyer's private order page (also in their confirmation email):</p>
                 <input type="text" readonly value="{{ $order->publicUrl() }}" class="mt-2 w-full border-2 border-line bg-bg px-3 py-2 text-label" onclick="this.select()" />
             </x-card>
         </div>

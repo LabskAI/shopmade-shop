@@ -61,12 +61,28 @@ class Product extends Model
         return $this->stock >= $qty;
     }
 
-    public function decrementStock(int $qty): void
+    /**
+     * Takes stock with a guarded UPDATE, so two checkouts can't oversell. False when there isn't enough left.
+     */
+    public function decrementStock(int $qty): bool
     {
         if (! $this->tracksStock()) {
-            return;
+            return true;
         }
 
-        $this->decrement('stock', $qty);
+        $taken = self::query()->whereKey($this->id)->where('stock', '>=', $qty)->decrement('stock', $qty) === 1;
+
+        if ($taken) {
+            $this->stock -= $qty;
+        }
+
+        return $taken;
+    }
+
+    public function restock(int $qty): void
+    {
+        if ($this->tracksStock()) {
+            self::query()->whereKey($this->id)->increment('stock', $qty);
+        }
     }
 }

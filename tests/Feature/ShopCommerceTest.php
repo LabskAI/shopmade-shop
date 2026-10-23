@@ -88,7 +88,7 @@ it('skips stripe checkout when keys are missing', function () {
 
     expect(app(StripeCheckout::class)->isConfigured())->toBeFalse();
 
-    $this->post(route('orders.stripe.store', $order))
+    $this->post(route('orders.stripe.store', ['order' => $order, 'token' => $order->access_token]))
         ->assertRedirect($order->publicUrl())
         ->assertSessionHas('status');
 
@@ -118,7 +118,7 @@ it('redirects to stripe when keys are configured', function () {
         'line_total' => 40,
     ]);
 
-    $this->post(route('orders.stripe.store', $order))
+    $this->post(route('orders.stripe.store', ['order' => $order, 'token' => $order->access_token]))
         ->assertRedirect('https://checkout.stripe.com/pay/cs_test_123');
 
     expect($order->fresh()->stripe_session_id)->toBe('cs_test_123');

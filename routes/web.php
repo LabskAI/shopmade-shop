@@ -22,7 +22,8 @@ Route::middleware('web')->group(function () {
     Route::delete('shop/cart/{product:slug}', [CartController::class, 'destroy'])->name('shop.cart.destroy');
 
     Route::get('orders/view/{order}/{token}', [PublicOrderController::class, 'show'])->name('orders.public.show');
-    Route::post('orders/{order}/stripe', [StripeCheckoutController::class, 'store'])->middleware('throttle:10,1')->name('orders.stripe.store');
+    Route::post('orders/view/{order}/{token}/stripe', [StripeCheckoutController::class, 'store'])->middleware('throttle:10,1')->name('orders.stripe.store');
+    Route::get('shop/stripe/return', [StripeCheckoutController::class, 'return'])->middleware('throttle:30,1')->name('shop.stripe.return');
 });
 
 // Stripe calls this without a session or CSRF token; the signature (or a lookup at Stripe) is the check.

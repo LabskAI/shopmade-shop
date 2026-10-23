@@ -19,7 +19,7 @@
                 <tr class="border-b border-line-soft">
                     <td class="px-4 py-3 text-control"><a href="{{ route('orders.show', $order) }}">{{ $order->number }}</a></td>
                     <td class="px-4 py-3 text-control text-ink/70">{{ $order->customer?->name ?? $order->guest_name }}</td>
-                    <td class="px-4 py-3 text-right text-control tabular-nums">${{ number_format($order->total, 2) }}</td>
+                    <td class="px-4 py-3 text-right text-control tabular-nums">{{ \Shopmade\Shop\Support\Money::format($order->total) }}</td>
                     <td class="px-4 py-3"><x-status :state="$order->status->value" /></td>
                     <td class="px-4 py-3 text-control text-ink/70">{{ $order->created_at->format('M j, Y') }}</td>
                 </tr>

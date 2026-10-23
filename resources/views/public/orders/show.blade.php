@@ -13,12 +13,12 @@
             <h2 class="sm-shop-h3" id="items-title">Items</h2>
             <ul class="sm-shop-sum-lines" role="list">
                 @foreach ($order->items as $item)
-                    <li><span>{{ $item->name }} × {{ $item->qty }}</span><span class="sm-shop-num">${{ number_format($item->line_total, 2) }}</span></li>
+                    <li><span>{{ $item->name }} × {{ $item->qty }}</span><span class="sm-shop-num">{{ \Shopmade\Shop\Support\Money::format($item->line_total) }}</span></li>
                 @endforeach
             </ul>
             <div class="sm-shop-total">
                 <span>Total</span>
-                <span class="sm-shop-price">${{ number_format($order->total, 2) }}</span>
+                <span class="sm-shop-price">{{ \Shopmade\Shop\Support\Money::format($order->total) }}</span>
             </div>
         </section>
 
@@ -31,7 +31,7 @@
         </section>
 
         @if ($stripeEnabled && $order->status->value === 'new')
-            <form method="POST" action="{{ route('orders.stripe.store', $order) }}" class="sm-shop-actions">
+            <form method="POST" action="{{ route('orders.stripe.store', ['order' => $order, 'token' => $order->access_token]) }}" class="sm-shop-actions">
                 @csrf
                 <button class="sm-shop-btn" type="submit">Pay with Stripe</button>
             </form>

@@ -35,22 +35,22 @@ class OrderController extends Controller
 
     public function markPaid(Order $order): RedirectResponse
     {
-        $order->markPaid();
+        $done = $order->markPaid();
 
-        return redirect()->route('orders.show', $order)->with('status', 'Order marked paid.');
+        return redirect()->route('orders.show', $order)->with('status', $done ? 'Order marked paid.' : 'Only a new order can be marked paid.');
     }
 
     public function markFulfilled(Order $order): RedirectResponse
     {
-        $order->markFulfilled();
+        $done = $order->markFulfilled();
 
-        return redirect()->route('orders.show', $order)->with('status', 'Order marked fulfilled.');
+        return redirect()->route('orders.show', $order)->with('status', $done ? 'Order marked fulfilled.' : 'Only a new or paid order can be fulfilled.');
     }
 
     public function markCancelled(Order $order): RedirectResponse
     {
-        $order->markCancelled();
+        $done = $order->markCancelled();
 
-        return redirect()->route('orders.show', $order)->with('status', 'Order cancelled.');
+        return redirect()->route('orders.show', $order)->with('status', $done ? 'Order cancelled. Its stock was put back.' : 'This order is already closed.');
     }
 }

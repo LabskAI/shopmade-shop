@@ -2,93 +2,139 @@
 
 namespace Shopmade\Shop\Services;
 
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Models\Order;
 
 class StripeCheckout
 {
+    private const string Api = 'https://api.stripe.com/v1';
+
     public function isConfigured(): bool
     {
         return filled(config('shop.stripe.secret')) && filled(config('shop.stripe.key'));
     }
 
     /**
+     * The Checkout URL for a new order: an open session is reused, otherwise one is created with an idempotency key,
+     * all under a row lock so two clicks can't open two payments. Null when the order is no longer new.
+     *
      * @throws RequestException
      */
-    public function createSession(Order $order): string
+    public function createSession(Order $order): ?string
     {
-        $order->load('items');
+        return DB::transaction(function () use ($order): ?string {
+            $order = Order::query()->lockForUpdate()->with('items')->findOrFail($order->id);
 
-        $lineItems = $order->items->map(fn ($item) => [
-            'price_data' => [
-                'currency' => config('shop.stripe.currency', 'usd'),
-                'product_data' => [
-                    'name' => $item->name,
-                ],
-                'unit_amount' => (int) round((float) $item->unit_price * 100),
-            ],
-            'quantity' => (int) $item->qty,
-        ])->values()->all();
+            if ($order->status !== OrderStatus::New) {
+                return null;
+            }
 
-        $response = Http::withToken(config('shop.stripe.secret'))
-            ->asForm()
-            ->post('https://api.stripe.com/v1/checkout/sessions', [
-                'mode' => 'payment',
-                'success_url' => $order->publicUrl().'?session_id={CHECKOUT_SESSION_ID}',
-                'cancel_url' => route('shop.checkout'),
-                'customer_email' => $order->guest_email,
-                'client_reference_id' => (string) $order->id,
-                'metadata' => [
-                    'order_id' => (string) $order->id,
-                    'order_number' => $order->number,
-                ],
-                ...collect($lineItems)->flatMap(fn (array $item, int $index) => [
-                    "line_items[{$index}][price_data][currency]" => $item['price_data']['currency'],
-                    "line_items[{$index}][price_data][product_data][name]" => $item['price_data']['product_data']['name'],
-                    "line_items[{$index}][price_data][unit_amount]" => $item['price_data']['unit_amount'],
-                    "line_items[{$index}][quantity]" => $item['quantity'],
-                ])->all(),
-            ])
-            ->throw();
+            if (filled($order->stripe_session_id)) {
+                $existing = $this->stripe()->get(self::Api.'/checkout/sessions/'.rawurlencode($order->stripe_session_id))->throw();
 
-        $sessionId = $response->json('id');
-        $checkoutUrl = $response->json('url');
+                if ($existing->json('status') === 'open' && filled($existing->json('url'))) {
+                    return $existing->json('url');
+                }
 
-        $order->update(['stripe_session_id' => $sessionId]);
+                if ($existing->json('status') === 'complete') {
+                    return null;
+                }
+            }
 
-        return $checkoutUrl;
-    }
-
-    public function handleCompletedSession(string $sessionId): bool
-    {
-        try {
-            $response = Http::withToken(config('shop.stripe.secret'))
-                ->get('https://api.stripe.com/v1/checkout/sessions/'.rawurlencode($sessionId))
+            $response = $this->stripe()
+                ->withHeaders(['Idempotency-Key' => 'order-'.$order->id.'-'.sha1((string) $order->stripe_session_id)])
+                ->asForm()
+                ->post(self::Api.'/checkout/sessions', [
+                    'mode' => 'payment',
+                    'payment_method_types' => ['card'],
+                    'success_url' => route('shop.stripe.return').'?session_id={CHECKOUT_SESSION_ID}',
+                    'cancel_url' => route('shop.checkout'),
+                    'customer_email' => $order->guest_email,
+                    'client_reference_id' => (string) $order->id,
+                    'metadata' => [
+                        'order_id' => (string) $order->id,
+                        'order_number' => $order->number,
+                    ],
+                    ...$order->items->values()->flatMap(fn ($item, int $index) => [
+                        "line_items[{$index}][price_data][currency]" => $this->currency(),
+                        "line_items[{$index}][price_data][product_data][name]" => $item->name,
+                        "line_items[{$index}][price_data][unit_amount]" => self::cents($item->unit_price),
+                        "line_items[{$index}][quantity]" => (int) $item->qty,
+                    ])->all(),
+                ])
                 ->throw();
 
-            if ($response->json('payment_status') !== 'paid') {
-                return false;
-            }
+            $order->forceFill(['stripe_session_id' => $response->json('id')])->save();
 
-            $order = $this->resolveOrder($response->json());
+            return $response->json('url');
+        });
+    }
 
-            if (! $order) {
-                return false;
-            }
+    /**
+     * Looks the session up at Stripe and marks its order paid. With $expected, only that order may be fulfilled.
+     *
+     * @throws RequestException when Stripe can't be reached, so the webhook answers 500 and Stripe retries
+     */
+    public function handleCompletedSession(string $sessionId, ?Order $expected = null): bool
+    {
+        $session = $this->stripe()->get(self::Api.'/checkout/sessions/'.rawurlencode($sessionId))->throw()->json();
 
-            $order->markPaid($sessionId);
+        return is_array($session) && $this->fulfil($session, $expected);
+    }
 
-            return true;
-        } catch (RequestException $exception) {
-            Log::warning('Stripe session lookup failed.', [
-                'session_id' => $sessionId,
-                'message' => $exception->getMessage(),
+    /**
+     * The order a paid session belongs to, after checking its order id, amount and currency against the order.
+     *
+     * @param  array<string, mixed>  $session
+     */
+    private function fulfil(array $session, ?Order $expected = null): bool
+    {
+        if (($session['payment_status'] ?? null) !== 'paid') {
+            return false;
+        }
+
+        $order = Order::query()->find($session['metadata']['order_id'] ?? null);
+
+        if ($order === null || ($expected !== null && ! $order->is($expected))) {
+            return false;
+        }
+
+        $matches = (string) ($session['client_reference_id'] ?? $order->id) === (string) $order->id
+            && (int) ($session['amount_total'] ?? -1) === self::cents($order->total)
+            && strtolower((string) ($session['currency'] ?? '')) === $this->currency();
+
+        if (! $matches) {
+            Log::error('Stripe session does not match its order; not marking it paid.', [
+                'order' => $order->number,
+                'session_id' => $session['id'] ?? null,
+                'amount_total' => $session['amount_total'] ?? null,
+                'currency' => $session['currency'] ?? null,
             ]);
 
             return false;
         }
+
+        return $order->markPaid($session['id'] ?? null);
+    }
+
+    private function stripe(): PendingRequest
+    {
+        return Http::withToken((string) config('shop.stripe.secret'))->acceptJson()->connectTimeout(5)->timeout(20);
+    }
+
+    private function currency(): string
+    {
+        return strtolower((string) config('shop.stripe.currency', 'usd'));
+    }
+
+    private static function cents(float|int|string|null $amount): int
+    {
+        return (int) round((float) $amount * 100);
     }
 
     /**
@@ -132,55 +178,26 @@ class StripeCheckout
     }
 
     /**
-     * Marks the order paid for a checkout.session.completed event. With a webhook secret the caller has already
-     * checked the signature; without one the payload is not trusted and the session is confirmed with Stripe.
+     * Marks the order paid for a checkout.session.completed or async_payment_succeeded event. With a webhook secret
+     * the caller has already checked the signature; without one the payload is not trusted and the session is
+     * confirmed with Stripe.
      *
      * @param  array<string, mixed>  $payload
+     *
+     * @throws RequestException
      */
     public function handleWebhookPayload(array $payload, bool $signed): bool
     {
-        if (($payload['type'] ?? null) !== 'checkout.session.completed') {
+        if (! in_array($payload['type'] ?? null, ['checkout.session.completed', 'checkout.session.async_payment_succeeded'], true)) {
             return false;
         }
 
         $session = $payload['data']['object'] ?? [];
 
-        if (! $signed) {
-            return is_string($session['id'] ?? null) && $this->handleCompletedSession($session['id']);
-        }
-
-        if (($session['payment_status'] ?? null) !== 'paid') {
+        if (! is_array($session) || ! is_string($session['id'] ?? null)) {
             return false;
         }
 
-        $order = $this->resolveOrder($session);
-
-        if (! $order) {
-            return false;
-        }
-
-        $order->markPaid($session['id'] ?? null);
-
-        return true;
-    }
-
-    /**
-     * @param  array<string, mixed>  $session
-     */
-    private function resolveOrder(array $session): ?Order
-    {
-        $orderId = $session['metadata']['order_id'] ?? $session['client_reference_id'] ?? null;
-
-        if ($orderId) {
-            return Order::query()->find($orderId);
-        }
-
-        $sessionId = $session['id'] ?? null;
-
-        if ($sessionId) {
-            return Order::query()->where('stripe_session_id', $sessionId)->first();
-        }
-
-        return null;
+        return $signed ? $this->fulfil($session) : $this->handleCompletedSession($session['id']);
     }
 }

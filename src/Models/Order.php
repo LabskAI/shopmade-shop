@@ -9,24 +9,20 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Shopmade\Shop\Database\Factories\OrderFactory;
 use Shopmade\Shop\Enums\OrderStatus;
 
 #[UseFactory(OrderFactory::class)]
 #[Fillable([
-    'number',
-    'status',
     'customer_id',
     'guest_name',
     'guest_email',
     'guest_phone',
     'address',
     'notes',
-    'total',
-    'stripe_session_id',
-    'access_token',
-    'paid_at',
 ])]
 class Order extends Model
 {
@@ -73,27 +69,76 @@ class Order extends Model
         ]);
     }
 
-    public function markPaid(?string $stripeSessionId = null): void
+    /**
+     * Moves a new order to paid, under a row lock. A payment for an order that is already paid (or was cancelled or
+     * fulfilled) is not treated as success: it is logged for a refund and false is returned.
+     */
+    public function markPaid(?string $stripeSessionId = null): bool
     {
-        if ($this->status === OrderStatus::Paid) {
-            return;
+        return DB::transaction(function () use ($stripeSessionId): bool {
+            $order = self::query()->lockForUpdate()->findOrFail($this->id);
+
+            if ($order->status === OrderStatus::Paid && ($stripeSessionId === null || $stripeSessionId === $order->stripe_session_id)) {
+                return true;
+            }
+
+            if ($order->status !== OrderStatus::New) {
+                Log::error('Payment received for an order that is not new; refund it in Stripe.', [
+                    'order' => $order->number,
+                    'status' => $order->status->value,
+                    'stripe_session_id' => $stripeSessionId,
+                    'paid_session_id' => $order->stripe_session_id,
+                ]);
+
+                return false;
+            }
+
+            $order->forceFill([
+                'status' => OrderStatus::Paid,
+                'paid_at' => now(),
+                'stripe_session_id' => $stripeSessionId ?? $order->stripe_session_id,
+            ])->save();
+
+            $this->setRawAttributes($order->getAttributes(), true);
+
+            return true;
+        });
+    }
+
+    public function markFulfilled(): bool
+    {
+        if ($this->status !== OrderStatus::Paid && $this->status !== OrderStatus::New) {
+            return false;
         }
 
-        $this->update([
-            'status' => OrderStatus::Paid,
-            'paid_at' => now(),
-            'stripe_session_id' => $stripeSessionId ?? $this->stripe_session_id,
-        ]);
+        $this->forceFill(['status' => OrderStatus::Fulfilled])->save();
+
+        return true;
     }
 
-    public function markFulfilled(): void
+    /**
+     * Cancels a new or paid order and puts its stock back.
+     */
+    public function markCancelled(): bool
     {
-        $this->update(['status' => OrderStatus::Fulfilled]);
-    }
+        return DB::transaction(function (): bool {
+            $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
-    public function markCancelled(): void
-    {
-        $this->update(['status' => OrderStatus::Cancelled]);
+            if ($order->status === OrderStatus::Cancelled || $order->status === OrderStatus::Fulfilled) {
+                return false;
+            }
+
+            $order->load('items.product');
+
+            foreach ($order->items as $item) {
+                $item->product?->restock((int) $item->qty);
+            }
+
+            $order->forceFill(['status' => OrderStatus::Cancelled])->save();
+            $this->setRawAttributes($order->getAttributes(), true);
+
+            return true;
+        });
     }
 
     public static function generateNumber(): string

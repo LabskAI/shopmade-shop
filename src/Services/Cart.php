@@ -101,8 +101,11 @@ class Cart
         $this->session->forget(self::SESSION_KEY);
     }
 
+    /**
+     * Empty when nothing in the cart is still an active product.
+     */
     public function isEmpty(): bool
     {
-        return $this->items() === [];
+        return $this->lines()->isEmpty();
     }
 }
