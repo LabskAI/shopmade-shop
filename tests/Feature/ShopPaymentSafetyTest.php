@@ -8,6 +8,7 @@ use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Enums\ProductType;
 use Shopmade\Shop\Models\Order;
 use Shopmade\Shop\Models\Product;
+use Shopmade\Shop\Services\StripeCheckout;
 use Tests\TestCase;
 
 pest()->extend(TestCase::class)->use(RefreshDatabase::class);
@@ -150,7 +151,7 @@ it('refuses to cancel a paid order', function () {
     $order = payableOrder(['status' => OrderStatus::Paid, 'paid_at' => now()]);
 
     $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
-        ->assertSessionHas('status', 'Paid orders can\'t be cancelled here. Refund the payment in Stripe and keep the order for your records.');
+        ->assertSessionHas('status', 'Paid orders can\'t be cancelled here. Refund the buyer directly and keep the order for your records.');
 
     expect($order->fresh()->status)->toBe(OrderStatus::Paid);
 });
@@ -236,4 +237,47 @@ it('records the card payment when staff mark paid an order the buyer already pai
         ->assertSessionHas('status', 'The buyer already paid by card, so that payment was recorded.');
 
     expect($order->fresh()->status)->toBe(OrderStatus::Paid)->and($order->fresh()->stripe_session_id)->toBe('cs_done');
+});
+
+it('keeps a cash payment when the expired event arrives before the mark paid finishes', function () {
+    stripeKeys();
+    config(['shop.stripe.webhook_secret' => null]);
+    $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 3, 'active' => true, 'price' => 40]);
+    $order = payableOrder(['stripe_session_id' => 'cs_open']);
+    $order->items()->update(['product_id' => $product->id]);
+    $expiredSession = ['id' => 'cs_open', 'status' => 'expired', 'metadata' => ['order_id' => (string) $order->id]];
+    $expired = false;
+
+    Http::fake(function (Request $request) use (&$expired, $expiredSession) {
+        if (str_ends_with($request->url(), '/expire')) {
+            $expired = true;
+            app(StripeCheckout::class)->handleWebhookPayload(['type' => 'checkout.session.expired', 'data' => ['object' => $expiredSession]], signed: true);
+
+            return Http::response($expiredSession);
+        }
+
+        if (str_ends_with($request->url(), '/checkout/sessions')) {
+            return Http::response(['id' => 'cs_new', 'url' => 'https://checkout.stripe.com/c/cs_new']);
+        }
+
+        return Http::response($expired ? $expiredSession : ['id' => 'cs_open', 'status' => 'open']);
+    });
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'Order marked paid.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid)
+        ->and($order->fresh()->offline_settlement_at)->toBeNull()
+        ->and($product->fresh()->stock)->toBe(3);
+});
+
+it('opens no new payment page while staff are settling an order offline', function () {
+    stripeKeys();
+    Http::fake();
+    $order = payableOrder(['offline_settlement_at' => now()]);
+
+    $this->post(route('orders.stripe.store', ['order' => $order, 'token' => $order->access_token]))
+        ->assertRedirect($order->publicUrl());
+
+    Http::assertNothingSent();
 });

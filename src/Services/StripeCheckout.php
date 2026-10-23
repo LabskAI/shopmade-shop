@@ -33,7 +33,7 @@ class StripeCheckout
     {
         $order = Order::query()->with('items')->findOrFail($order->id);
 
-        if ($order->status !== OrderStatus::New) {
+        if ($order->status !== OrderStatus::New || $order->offline_settlement_at !== null) {
             return null;
         }
 
@@ -85,7 +85,7 @@ class StripeCheckout
                 return true;
             }
 
-            if ($locked->status !== OrderStatus::New || $locked->stripe_session_id !== $previousSessionId) {
+            if ($locked->status !== OrderStatus::New || $locked->offline_settlement_at !== null || $locked->stripe_session_id !== $previousSessionId) {
                 return false;
             }
 
@@ -319,6 +319,6 @@ class StripeCheckout
 
         $order = Order::query()->find($session['metadata']['order_id'] ?? null);
 
-        return $order !== null && $order->markCancelled($session['id']);
+        return $order !== null && $order->markCancelled($session['id'], abandoned: true);
     }
 }

@@ -35,6 +35,7 @@ class Order extends Model
             'status' => OrderStatus::class,
             'total' => 'decimal:2',
             'paid_at' => 'datetime',
+            'offline_settlement_at' => 'datetime',
         ];
     }
 
@@ -119,6 +120,33 @@ class Order extends Model
     }
 
     /**
+     * Claims a new order for a payment staff took outside Stripe, before its Checkout Session is expired. While the
+     * claim is set no new session opens and an expired-session event doesn't cancel the order. Returns the session id
+     * to close, or false when the order is no longer new.
+     */
+    public function claimOfflineSettlement(): string|false|null
+    {
+        return DB::transaction(function (): string|false|null {
+            $order = self::query()->lockForUpdate()->findOrFail($this->id);
+
+            if ($order->status !== OrderStatus::New) {
+                return false;
+            }
+
+            $order->forceFill(['offline_settlement_at' => now()])->save();
+            $this->setRawAttributes($order->getAttributes(), true);
+
+            return $order->stripe_session_id;
+        });
+    }
+
+    public function releaseOfflineSettlement(): void
+    {
+        self::query()->whereKey($this->id)->update(['offline_settlement_at' => null]);
+        $this->offline_settlement_at = null;
+    }
+
+    /**
      * Staff recorded a payment taken outside Stripe (cash, check). Close the order's Checkout Session first and pass
      * the id that was closed; the mark is refused, quietly, unless the order is still new with that same session.
      */
@@ -131,7 +159,7 @@ class Order extends Model
                 return false;
             }
 
-            $order->forceFill(['status' => OrderStatus::Paid, 'paid_at' => now()])->save();
+            $order->forceFill(['status' => OrderStatus::Paid, 'paid_at' => now(), 'offline_settlement_at' => null])->save();
             $this->setRawAttributes($order->getAttributes(), true);
 
             return true;
@@ -157,14 +185,19 @@ class Order extends Model
     /**
      * Cancels an unpaid order and puts its stock back. A paid order is refused: refund it in Stripe first. Close any
      * open Checkout Session (StripeCheckout::closeSession) before calling this and pass the id that was closed: if
-     * another session was saved meanwhile, the cancel is refused so that session can be closed too.
+     * another session was saved meanwhile, the cancel is refused so that session can be closed too. $abandoned is
+     * for an expired-session event: it never cancels an order staff are settling offline.
      */
-    public function markCancelled(?string $closedSessionId = null): bool
+    public function markCancelled(?string $closedSessionId = null, bool $abandoned = false): bool
     {
-        return DB::transaction(function () use ($closedSessionId): bool {
+        return DB::transaction(function () use ($closedSessionId, $abandoned): bool {
             $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
             if ($order->status !== OrderStatus::New || $order->stripe_session_id !== $closedSessionId) {
+                return false;
+            }
+
+            if ($abandoned && $order->offline_settlement_at !== null) {
                 return false;
             }
 
@@ -174,7 +207,7 @@ class Order extends Model
                 $item->product?->restock((int) $item->qty);
             }
 
-            $order->forceFill(['status' => OrderStatus::Cancelled])->save();
+            $order->forceFill(['status' => OrderStatus::Cancelled, 'offline_settlement_at' => null])->save();
             $this->setRawAttributes($order->getAttributes(), true);
 
             return true;
