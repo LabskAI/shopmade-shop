@@ -2,8 +2,10 @@
 
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Enums\ProductType;
 use Shopmade\Shop\Models\Order;
@@ -280,4 +282,67 @@ it('opens no new payment page while staff are settling an order offline', functi
         ->assertRedirect($order->publicUrl());
 
     Http::assertNothingSent();
+});
+
+it('holds the order when Stripe does not answer the expire, and lets staff retry', function () {
+    stripeKeys();
+    $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 3, 'active' => true, 'price' => 40]);
+    $order = payableOrder(['stripe_session_id' => 'cs_open']);
+    $order->items()->update(['product_id' => $product->id]);
+    $expiredSession = ['id' => 'cs_open', 'status' => 'expired', 'metadata' => ['order_id' => (string) $order->id]];
+    $stripeDown = true;
+    $gets = 0;
+
+    Http::fake(function (Request $request) use (&$stripeDown, &$gets, $expiredSession) {
+        if (str_ends_with($request->url(), '/expire') || ($stripeDown && $gets++ > 0)) {
+            throw new ConnectionException('Stripe timed out.');
+        }
+
+        return Http::response($stripeDown ? ['id' => 'cs_open', 'status' => 'open'] : $expiredSession);
+    });
+    $admin = User::factory()->admin()->create();
+
+    $this->actingAs($admin)->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'Stripe did not answer, so the order is held unpaid and can\'t be paid online meanwhile. Try again in a minute.');
+
+    app(StripeCheckout::class)->handleWebhookPayload(['type' => 'checkout.session.expired', 'data' => ['object' => $expiredSession]], signed: true);
+
+    expect($order->fresh()->status)->toBe(OrderStatus::New)
+        ->and($order->fresh()->offline_settlement_at)->not->toBeNull()
+        ->and($product->fresh()->stock)->toBe(3);
+
+    $this->actingAs($admin)->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'This order is already being marked paid. Try again in a minute.');
+
+    $stripeDown = false;
+    $this->travel(61)->seconds();
+
+    $this->actingAs($admin)->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'Order marked paid.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid)
+        ->and($order->fresh()->offline_settlement_at)->toBeNull()
+        ->and($product->fresh()->stock)->toBe(3);
+});
+
+it('refuses a staff cancel while the order is being marked paid', function () {
+    stripeKeys();
+    Http::fake();
+    $order = payableOrder(['offline_settlement_at' => now(), 'offline_settlement_token' => 'held']);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
+        ->assertSessionHas('status', 'This order is being marked paid right now, so it was not cancelled. Reload it in a minute.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::New);
+    Http::assertNothingSent();
+});
+
+it('rolls back and reapplies the offline settlement migration', function () {
+    $migration = require __DIR__.'/../../database/migrations/2026_10_23_150000_add_offline_settlement_at_to_orders_table.php';
+
+    $migration->down();
+    expect(Schema::hasColumns('orders', ['offline_settlement_at', 'offline_settlement_token']))->toBeFalse();
+
+    $migration->up();
+    expect(Schema::hasColumns('orders', ['offline_settlement_at', 'offline_settlement_token']))->toBeTrue();
 });

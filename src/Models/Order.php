@@ -111,6 +111,8 @@ class Order extends Model
                 'status' => OrderStatus::Paid,
                 'paid_at' => now(),
                 'stripe_session_id' => $stripeSessionId ?? $order->stripe_session_id,
+                'offline_settlement_at' => null,
+                'offline_settlement_token' => null,
             ])->save();
 
             $this->setRawAttributes($order->getAttributes(), true);
@@ -120,46 +122,85 @@ class Order extends Model
     }
 
     /**
-     * Claims a new order for a payment staff took outside Stripe, before its Checkout Session is expired. While the
-     * claim is set no new session opens and an expired-session event doesn't cancel the order. Returns the session id
-     * to close, or false when the order is no longer new.
+     * How long a mark-paid claim blocks a second one. After that a retry may take the claim over, for example when
+     * Stripe's answer to the expire call was lost.
      */
-    public function claimOfflineSettlement(): string|false|null
+    public const int OfflineSettlementHoldSeconds = 60;
+
+    /**
+     * Claims a new order for a payment staff took outside Stripe, before its Checkout Session is expired. While the
+     * claim is set no new session opens and an expired-session event doesn't cancel the order. Returns the claim
+     * (its token and the session id to close), 'held' while another request's claim is fresh, or 'closed' when the
+     * order is no longer new.
+     *
+     * @return array{token: string, session: ?string}|'held'|'closed'
+     */
+    public function claimOfflineSettlement(): array|string
     {
-        return DB::transaction(function (): string|false|null {
+        return DB::transaction(function (): array|string {
             $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
             if ($order->status !== OrderStatus::New) {
-                return false;
+                return 'closed';
             }
 
-            $order->forceFill(['offline_settlement_at' => now()])->save();
+            if ($order->hasFreshOfflineSettlement()) {
+                return 'held';
+            }
+
+            $token = Str::random(40);
+            $order->forceFill(['offline_settlement_at' => now(), 'offline_settlement_token' => $token])->save();
             $this->setRawAttributes($order->getAttributes(), true);
 
-            return $order->stripe_session_id;
+            return ['token' => $token, 'session' => $order->stripe_session_id];
         });
     }
 
-    public function releaseOfflineSettlement(): void
+    /**
+     * A payment recorded from Stripe keeps its session id; one recorded by staff drops it.
+     */
+    public function paidByCard(): bool
     {
-        self::query()->whereKey($this->id)->update(['offline_settlement_at' => null]);
-        $this->offline_settlement_at = null;
+        return $this->paid_at !== null && filled($this->stripe_session_id);
+    }
+
+    public function hasFreshOfflineSettlement(): bool
+    {
+        return $this->offline_settlement_at !== null
+            && $this->offline_settlement_at->gt(now()->subSeconds(self::OfflineSettlementHoldSeconds));
+    }
+
+    /**
+     * Releases this request's claim only, never one another request took over.
+     */
+    public function releaseOfflineSettlement(string $token): void
+    {
+        self::query()->whereKey($this->id)->where('offline_settlement_token', $token)
+            ->update(['offline_settlement_at' => null, 'offline_settlement_token' => null]);
     }
 
     /**
      * Staff recorded a payment taken outside Stripe (cash, check). Close the order's Checkout Session first and pass
      * the id that was closed; the mark is refused, quietly, unless the order is still new with that same session.
      */
-    public function markPaidByStaff(?string $closedSessionId): bool
+    public function markPaidByStaff(string $token, ?string $closedSessionId): bool
     {
-        return DB::transaction(function () use ($closedSessionId): bool {
+        return DB::transaction(function () use ($token, $closedSessionId): bool {
             $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
-            if ($order->status !== OrderStatus::New || $order->stripe_session_id !== $closedSessionId) {
+            if ($order->status !== OrderStatus::New || $order->stripe_session_id !== $closedSessionId || $order->offline_settlement_token !== $token) {
                 return false;
             }
 
-            $order->forceFill(['status' => OrderStatus::Paid, 'paid_at' => now(), 'offline_settlement_at' => null])->save();
+            // The closed session is dropped, so the order reads as paid outside Stripe and a late event for that
+            // session is refused (and logged for a refund) instead of matching.
+            $order->forceFill([
+                'status' => OrderStatus::Paid,
+                'paid_at' => now(),
+                'stripe_session_id' => null,
+                'offline_settlement_at' => null,
+                'offline_settlement_token' => null,
+            ])->save();
             $this->setRawAttributes($order->getAttributes(), true);
 
             return true;
@@ -207,7 +248,7 @@ class Order extends Model
                 $item->product?->restock((int) $item->qty);
             }
 
-            $order->forceFill(['status' => OrderStatus::Cancelled, 'offline_settlement_at' => null])->save();
+            $order->forceFill(['status' => OrderStatus::Cancelled, 'offline_settlement_at' => null, 'offline_settlement_token' => null])->save();
             $this->setRawAttributes($order->getAttributes(), true);
 
             return true;

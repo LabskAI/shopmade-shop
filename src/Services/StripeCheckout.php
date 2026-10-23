@@ -4,11 +4,9 @@ namespace Shopmade\Shop\Services;
 
 use Illuminate\Http\Client\HttpClientException;
 use Illuminate\Http\Client\PendingRequest;
-use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use RuntimeException;
 use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Models\Order;
 use Shopmade\Shop\Support\Money;
@@ -107,7 +105,8 @@ class StripeCheckout
      * Closes the order's Checkout Session so the buyer can't pay after staff cancel. False when the buyer has
      * already paid: the payment is recorded and the order must not be cancelled.
      *
-     * @throws HttpClientException
+     * @throws SessionStillOpen when Stripe confirms the session is still open
+     * @throws HttpClientException when Stripe's answer is unknown
      */
     public function closeSession(Order $order): bool
     {
@@ -122,7 +121,9 @@ class StripeCheckout
                 $this->expire($order->stripe_session_id, throw: true);
 
                 return true;
-            } catch (RequestException) {
+            } catch (HttpClientException) {
+                // The expire may or may not have happened: ask again. If Stripe can't answer this either, the
+                // exception reaches the caller and the outcome stays unknown.
                 $session = $this->session($order->stripe_session_id);
             }
         }
@@ -134,7 +135,7 @@ class StripeCheckout
         }
 
         if (($session['status'] ?? null) !== 'expired') {
-            throw new RuntimeException('Stripe did not close the Checkout Session for order '.$order->number.'.');
+            throw new SessionStillOpen('Stripe did not close the Checkout Session for order '.$order->number.'.');
         }
 
         return true;

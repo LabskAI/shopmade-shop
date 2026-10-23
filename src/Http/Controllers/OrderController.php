@@ -7,9 +7,9 @@ use Illuminate\Http\Client\HttpClientException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
-use RuntimeException;
 use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Models\Order;
+use Shopmade\Shop\Services\SessionStillOpen;
 use Shopmade\Shop\Services\StripeCheckout;
 
 class OrderController extends Controller
@@ -42,35 +42,47 @@ class OrderController extends Controller
      */
     public function markPaid(Order $order, StripeCheckout $stripe): RedirectResponse
     {
-        $closedSessionId = $order->claimOfflineSettlement();
+        $claim = $order->claimOfflineSettlement();
 
-        if ($closedSessionId === false) {
+        if ($claim === 'closed') {
             return $this->back($order, 'Only a new order can be marked paid.');
+        }
+
+        if ($claim === 'held') {
+            return $this->back($order, 'This order is already being marked paid. Try again in a minute.');
         }
 
         try {
             $closed = $stripe->closeSession($order);
-        } catch (HttpClientException|RuntimeException $exception) {
+        } catch (SessionStillOpen $exception) {
             report($exception);
-            $order->releaseOfflineSettlement();
+            $order->releaseOfflineSettlement($claim['token']);
 
-            return $this->back($order, 'Could not close the Stripe payment page, so the order was not marked paid. Try again.');
+            return $this->back($order, 'Stripe kept the payment page open, so the order was not marked paid. Try again.');
+        } catch (HttpClientException $exception) {
+            report($exception);
+
+            return $this->back($order, 'Stripe did not answer, so the order is held unpaid and can\'t be paid online meanwhile. Try again in a minute.');
         }
 
-        if ($closed && $order->markPaidByStaff($closedSessionId)) {
+        if ($closed && $order->markPaidByStaff($claim['token'], $claim['session'])) {
             return $this->back($order, 'Order marked paid.');
         }
 
-        $order->releaseOfflineSettlement();
+        $order->releaseOfflineSettlement($claim['token']);
         $order->refresh();
 
         if ($order->status === OrderStatus::Paid || $order->paid_at !== null) {
             return $this->back($order, 'The buyer already paid by card, so that payment was recorded.');
         }
 
+        if ($order->status === OrderStatus::Cancelled) {
+            return $this->back($order, 'The order was cancelled meanwhile, so it was not marked paid.');
+        }
+
         return $this->back($order, $closed
             ? 'Only a new order can be marked paid.'
-            : 'Stripe reports a completed payment that does not match this order, so nothing was recorded. Check it in Stripe.');
+            : 'Stripe shows this checkout as complete but has no payment to record yet. Check it in Stripe before marking it paid.');
     }
 
     private function back(Order $order, string $status): RedirectResponse
@@ -91,7 +103,7 @@ class OrderController extends Controller
     public function markCancelled(Order $order, StripeCheckout $stripe): RedirectResponse
     {
         if ($order->status === OrderStatus::Paid) {
-            return $this->back($order, filled($order->stripe_session_id)
+            return $this->back($order, $order->paidByCard()
                 ? 'Paid orders can\'t be cancelled here. Refund the payment in Stripe and keep the order for your records.'
                 : 'Paid orders can\'t be cancelled here. Refund the buyer directly and keep the order for your records.');
         }
@@ -102,9 +114,13 @@ class OrderController extends Controller
 
         $closedSessionId = $order->stripe_session_id;
 
+        if ($order->hasFreshOfflineSettlement()) {
+            return $this->back($order, 'This order is being marked paid right now, so it was not cancelled. Reload it in a minute.');
+        }
+
         try {
             $closed = $stripe->closeSession($order);
-        } catch (HttpClientException|RuntimeException $exception) {
+        } catch (HttpClientException|SessionStillOpen $exception) {
             report($exception);
 
             return redirect()->route('orders.show', $order)->with('status', 'Could not close the Stripe payment page, so the order was not cancelled. Try again.');

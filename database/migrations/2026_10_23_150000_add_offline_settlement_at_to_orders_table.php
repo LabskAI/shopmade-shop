@@ -14,13 +14,14 @@ return new class extends Migration
     {
         Schema::table('orders', function (Blueprint $table) {
             $table->timestamp('offline_settlement_at')->nullable();
+            $table->string('offline_settlement_token', 64)->nullable();
         });
     }
 
     public function down(): void
     {
         Schema::table('orders', function (Blueprint $table) {
-            $table->dropColumn('offline_settlement_at');
+            $table->dropColumn(['offline_settlement_at', 'offline_settlement_token']);
         });
     }
 };
