@@ -118,6 +118,26 @@ class Order extends Model
         });
     }
 
+    /**
+     * Staff recorded a payment taken outside Stripe (cash, check). Close the order's Checkout Session first and pass
+     * the id that was closed; the mark is refused, quietly, unless the order is still new with that same session.
+     */
+    public function markPaidByStaff(?string $closedSessionId): bool
+    {
+        return DB::transaction(function () use ($closedSessionId): bool {
+            $order = self::query()->lockForUpdate()->findOrFail($this->id);
+
+            if ($order->status !== OrderStatus::New || $order->stripe_session_id !== $closedSessionId) {
+                return false;
+            }
+
+            $order->forceFill(['status' => OrderStatus::Paid, 'paid_at' => now()])->save();
+            $this->setRawAttributes($order->getAttributes(), true);
+
+            return true;
+        });
+    }
+
     public function markFulfilled(): bool
     {
         return DB::transaction(function (): bool {

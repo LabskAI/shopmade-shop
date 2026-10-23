@@ -5,7 +5,9 @@ use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Shopmade\Shop\Enums\OrderStatus;
+use Shopmade\Shop\Enums\ProductType;
 use Shopmade\Shop\Models\Order;
+use Shopmade\Shop\Models\Product;
 use Tests\TestCase;
 
 pest()->extend(TestCase::class)->use(RefreshDatabase::class);
@@ -121,15 +123,33 @@ it('records payment on a fulfilled order once, and accepts a repeated event quie
     Log::shouldNotHaveReceived('error');
 });
 
-it('compares a zero-decimal payment with the charged line amounts', function () {
-    config(['shop.stripe.webhook_secret' => 'whsec_test', 'shop.stripe.currency' => 'jpy']);
-    $order = Order::factory()->create(['stripe_session_id' => 'cs_test_1', 'status' => OrderStatus::New, 'total' => 1001]);
-    $order->items()->create(['name' => 'Item', 'unit_price' => 500.5, 'qty' => 2, 'line_total' => 1001]);
+it('stores the same zero-decimal total that Stripe charges', function () {
+    config(['shop.stripe.currency' => 'jpy']);
+    $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 5, 'active' => true, 'price' => 500.5]);
 
-    [$server, $payload] = signedWebhook(completedSession($order, ['amount_total' => 1002, 'currency' => 'jpy']));
+    $this->post(route('shop.cart.store', $product), ['qty' => 2]);
+    $this->post(route('shop.checkout.store'), ['guest_name' => 'Ana', 'guest_email' => 'ana@example.com', 'address' => '1 Main St']);
 
+    $order = Order::query()->with('items')->firstOrFail();
+
+    expect((float) $order->total)->toBe(1002.0)
+        ->and((float) $order->items->first()->unit_price)->toBe(501.0);
+});
+
+it('cancels an abandoned order and puts its stock back when its session expires', function () {
+    config(['shop.stripe.webhook_secret' => 'whsec_test']);
+    $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 1, 'active' => true, 'price' => 40]);
+    $order = webhookOrder(['stripe_session_id' => 'cs_test_1', 'status' => OrderStatus::New, 'total' => 40]);
+    $order->items()->update(['product_id' => $product->id, 'qty' => 2]);
+
+    [$server, $payload] = signedWebhook(['type' => 'checkout.session.expired', 'data' => ['object' => ['id' => 'cs_other', 'status' => 'expired', 'metadata' => ['order_id' => (string) $order->id]]]]);
+    $this->call('POST', route('stripe.webhook'), [], [], [], $server, $payload)->assertOk()->assertSee('Ignored');
+    expect($order->fresh()->status)->toBe(OrderStatus::New);
+
+    [$server, $payload] = signedWebhook(['type' => 'checkout.session.expired', 'data' => ['object' => ['id' => 'cs_test_1', 'status' => 'expired', 'metadata' => ['order_id' => (string) $order->id]]]]);
     $this->call('POST', route('stripe.webhook'), [], [], [], $server, $payload)->assertOk()->assertSee('OK');
-    expect($order->fresh()->status)->toBe(OrderStatus::Paid);
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Cancelled)->and($product->fresh()->stock)->toBe(3);
 });
 
 it('does not move a cancelled order to paid', function () {

@@ -8,7 +8,7 @@
         <x-slot:actions>
             <x-status :state="$order->status->value" />
             @if (auth()->user()->canManageCoreTool('orders'))
-                @if ($order->status->value !== 'paid')
+                @if ($order->status === \Shopmade\Shop\Enums\OrderStatus::New)
                     <form method="POST" action="{{ route('orders.mark-paid', $order) }}">
                         @csrf
                         <x-button type="submit">Mark paid</x-button>

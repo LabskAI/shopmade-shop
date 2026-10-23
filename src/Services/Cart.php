@@ -5,6 +5,7 @@ namespace Shopmade\Shop\Services;
 use Illuminate\Contracts\Session\Session;
 use Illuminate\Support\Collection;
 use Shopmade\Shop\Models\Product;
+use Shopmade\Shop\Support\Money;
 
 class Cart
 {
@@ -51,7 +52,7 @@ class Cart
                 return [
                     'product' => $product,
                     'qty' => $qty,
-                    'line_total' => round((float) $product->price * $qty, 2),
+                    'line_total' => Money::round(Money::round($product->price) * $qty),
                 ];
             })
             ->filter()

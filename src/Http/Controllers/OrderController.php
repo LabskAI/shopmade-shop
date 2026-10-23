@@ -36,11 +36,37 @@ class OrderController extends Controller
         return view('shop::orders.show', compact('order'));
     }
 
-    public function markPaid(Order $order): RedirectResponse
+    /**
+     * Records a payment taken outside Stripe. The Stripe payment page is closed first so the buyer can't also pay by
+     * card; if Stripe already took the payment, that payment is recorded instead.
+     */
+    public function markPaid(Order $order, StripeCheckout $stripe): RedirectResponse
     {
-        $done = $order->markPaid();
+        if ($order->status !== OrderStatus::New) {
+            return redirect()->route('orders.show', $order)->with('status', 'Only a new order can be marked paid.');
+        }
 
-        return redirect()->route('orders.show', $order)->with('status', $done ? 'Order marked paid.' : 'Only a new order can be marked paid.');
+        $closedSessionId = $order->stripe_session_id;
+
+        try {
+            $closed = $stripe->closeSession($order);
+        } catch (HttpClientException|RuntimeException $exception) {
+            report($exception);
+
+            return redirect()->route('orders.show', $order)->with('status', 'Could not close the Stripe payment page, so the order was not marked paid. Try again.');
+        }
+
+        if (! $closed) {
+            return redirect()->route('orders.show', $order)->with('status', 'The buyer already paid by card, so that payment was recorded.');
+        }
+
+        if (! $order->markPaidByStaff($closedSessionId)) {
+            return redirect()->route('orders.show', $order)->with('status', $order->fresh()->status === OrderStatus::New
+                ? 'The buyer opened a new payment page meanwhile. Try again.'
+                : 'Only a new order can be marked paid.');
+        }
+
+        return redirect()->route('orders.show', $order)->with('status', 'Order marked paid.');
     }
 
     public function markFulfilled(Order $order): RedirectResponse
@@ -56,7 +82,7 @@ class OrderController extends Controller
     public function markCancelled(Order $order, StripeCheckout $stripe): RedirectResponse
     {
         if ($order->status === OrderStatus::Paid) {
-            return redirect()->route('orders.show', $order)->with('status', 'This order is paid. Refund it in Stripe before cancelling it.');
+            return redirect()->route('orders.show', $order)->with('status', 'Paid orders can\'t be cancelled here. Refund the payment in Stripe and keep the order for your records.');
         }
 
         if ($order->status !== OrderStatus::New) {

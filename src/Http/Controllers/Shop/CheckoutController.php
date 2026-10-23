@@ -19,6 +19,7 @@ use Shopmade\Shop\Models\Product;
 use Shopmade\Shop\Services\Cart;
 use Shopmade\Shop\Services\OutOfStock;
 use Shopmade\Shop\Services\StripeCheckout;
+use Shopmade\Shop\Support\Money;
 use Throwable;
 
 class CheckoutController extends Controller
@@ -118,7 +119,7 @@ class CheckoutController extends Controller
                     'order_id' => $order->id,
                     'product_id' => $line['product']->id,
                     'name' => $line['product']->name,
-                    'unit_price' => $line['product']->price,
+                    'unit_price' => Money::round($line['product']->price),
                     'qty' => $line['qty'],
                     'line_total' => $line['line_total'],
                 ]);

@@ -150,7 +150,7 @@ it('refuses to cancel a paid order', function () {
     $order = payableOrder(['status' => OrderStatus::Paid, 'paid_at' => now()]);
 
     $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
-        ->assertSessionHas('status', 'This order is paid. Refund it in Stripe before cancelling it.');
+        ->assertSessionHas('status', 'Paid orders can\'t be cancelled here. Refund the payment in Stripe and keep the order for your records.');
 
     expect($order->fresh()->status)->toBe(OrderStatus::Paid);
 });
@@ -208,3 +208,32 @@ it('forbids view-only users from changing order status', function (string $route
 
     expect($order->fresh()->status)->toBe(OrderStatus::New);
 })->with(['orders.mark-paid', 'orders.mark-fulfilled', 'orders.mark-cancelled']);
+
+it('closes the Stripe payment page before staff mark an order paid', function () {
+    stripeKeys();
+    $order = payableOrder(['stripe_session_id' => 'cs_open']);
+    Http::fake([
+        'api.stripe.com/v1/checkout/sessions/cs_open/expire' => Http::response(['id' => 'cs_open', 'status' => 'expired']),
+        'api.stripe.com/v1/checkout/sessions/cs_open' => Http::response(['id' => 'cs_open', 'status' => 'open']),
+    ]);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'Order marked paid.');
+
+    Http::assertSent(fn (Request $request) => str_ends_with($request->url(), '/cs_open/expire'));
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid);
+});
+
+it('records the card payment when staff mark paid an order the buyer already paid', function () {
+    stripeKeys();
+    $order = payableOrder(['stripe_session_id' => 'cs_done']);
+    Http::fake(['api.stripe.com/*' => Http::response([
+        'id' => 'cs_done', 'status' => 'complete', 'payment_status' => 'paid', 'amount_total' => 4000, 'currency' => 'usd',
+        'client_reference_id' => (string) $order->id, 'metadata' => ['order_id' => (string) $order->id],
+    ])]);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'The buyer already paid by card, so that payment was recorded.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid)->and($order->fresh()->stripe_session_id)->toBe('cs_done');
+});

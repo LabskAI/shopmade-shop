@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Models\Order;
+use Shopmade\Shop\Support\Money;
 
 class StripeCheckout
 {
@@ -229,14 +230,9 @@ class StripeCheckout
         return (int) $order->items()->get()->sum(fn ($item): int => $this->minorUnits($item->unit_price) * (int) $item->qty);
     }
 
-    /**
-     * Stripe amounts are in the currency's smallest unit: cents for most, whole units for zero-decimal currencies.
-     */
     private function minorUnits(float|int|string|null $amount): int
     {
-        $zeroDecimal = ['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'vnd', 'vuv', 'xaf', 'xof', 'xpf'];
-
-        return (int) round((float) $amount * (in_array($this->currency(), $zeroDecimal, true) ? 1 : 100));
+        return Money::minorUnits($amount);
     }
 
     /**
@@ -290,7 +286,9 @@ class StripeCheckout
      */
     public function handleWebhookPayload(array $payload, bool $signed): bool
     {
-        if (! in_array($payload['type'] ?? null, ['checkout.session.completed', 'checkout.session.async_payment_succeeded'], true)) {
+        $type = $payload['type'] ?? null;
+
+        if (! in_array($type, ['checkout.session.completed', 'checkout.session.async_payment_succeeded', 'checkout.session.expired'], true)) {
             return false;
         }
 
@@ -300,6 +298,27 @@ class StripeCheckout
             return false;
         }
 
+        if ($type === 'checkout.session.expired') {
+            return $this->releaseExpired($signed ? $session : $this->session($session['id']));
+        }
+
         return $signed ? $this->fulfil($session) : $this->handleCompletedSession($session['id']);
+    }
+
+    /**
+     * An abandoned checkout: cancel the order and put its stock back, but only while the order is still new and the
+     * expired session is the one it holds.
+     *
+     * @param  array<string, mixed>  $session
+     */
+    private function releaseExpired(array $session): bool
+    {
+        if (($session['status'] ?? null) !== 'expired' || ! is_string($session['id'] ?? null)) {
+            return false;
+        }
+
+        $order = Order::query()->find($session['metadata']['order_id'] ?? null);
+
+        return $order !== null && $order->markCancelled($session['id']);
     }
 }
