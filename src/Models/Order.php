@@ -79,7 +79,9 @@ class Order extends Model
         return DB::transaction(function () use ($stripeSessionId): bool {
             $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
-            if ($order->status === OrderStatus::Paid && ($stripeSessionId === null || $stripeSessionId === $order->stripe_session_id)) {
+            $sameSession = $stripeSessionId === null || $stripeSessionId === $order->stripe_session_id;
+
+            if (($order->status === OrderStatus::Paid || ($order->status === OrderStatus::Fulfilled && $order->paid_at !== null)) && $sameSession) {
                 return true;
             }
 
@@ -134,14 +136,15 @@ class Order extends Model
 
     /**
      * Cancels an unpaid order and puts its stock back. A paid order is refused: refund it in Stripe first. Close any
-     * open Checkout Session (StripeCheckout::closeSession) before calling this, so the buyer can't pay afterwards.
+     * open Checkout Session (StripeCheckout::closeSession) before calling this and pass the id that was closed: if
+     * another session was saved meanwhile, the cancel is refused so that session can be closed too.
      */
-    public function markCancelled(): bool
+    public function markCancelled(?string $closedSessionId = null): bool
     {
-        return DB::transaction(function (): bool {
+        return DB::transaction(function () use ($closedSessionId): bool {
             $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
-            if ($order->status !== OrderStatus::New) {
+            if ($order->status !== OrderStatus::New || $order->stripe_session_id !== $closedSessionId) {
                 return false;
             }
 

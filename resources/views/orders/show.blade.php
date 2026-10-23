@@ -20,7 +20,7 @@
                         <x-button variant="secondary" type="submit">Mark fulfilled</x-button>
                     </form>
                 @endif
-                @if ($order->status->value !== 'cancelled')
+                @if ($order->status === \Shopmade\Shop\Enums\OrderStatus::New)
                     <form method="POST" action="{{ route('orders.mark-cancelled', $order) }}">
                         @csrf
                         <x-button variant="ghost" type="submit">Cancel</x-button>

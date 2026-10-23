@@ -59,6 +59,12 @@ class OrderController extends Controller
             return redirect()->route('orders.show', $order)->with('status', 'This order is paid. Refund it in Stripe before cancelling it.');
         }
 
+        if ($order->status !== OrderStatus::New) {
+            return redirect()->route('orders.show', $order)->with('status', 'Only an unpaid order can be cancelled.');
+        }
+
+        $closedSessionId = $order->stripe_session_id;
+
         try {
             $closed = $stripe->closeSession($order);
         } catch (HttpClientException|RuntimeException $exception) {
@@ -71,7 +77,11 @@ class OrderController extends Controller
             return redirect()->route('orders.show', $order)->with('status', 'The buyer has already paid, so the order was not cancelled.');
         }
 
-        $done = $order->markCancelled();
+        $done = $order->markCancelled($closedSessionId);
+
+        if (! $done && $order->fresh()->status === OrderStatus::New) {
+            return redirect()->route('orders.show', $order)->with('status', 'The buyer opened a new payment page while you were cancelling. Try again.');
+        }
 
         return redirect()->route('orders.show', $order)->with('status', $done ? 'Order cancelled. Its stock was put back.' : 'Only an unpaid order can be cancelled.');
     }

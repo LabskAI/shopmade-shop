@@ -193,7 +193,7 @@ class StripeCheckout
         $matches = (string) ($session['client_reference_id'] ?? '') === (string) $order->id
             && filled($session['id'] ?? null)
             && $session['id'] === $order->stripe_session_id
-            && (int) ($session['amount_total'] ?? -1) === $this->minorUnits($order->total)
+            && (int) ($session['amount_total'] ?? -1) === $this->chargedAmount($order)
             && strtolower((string) ($session['currency'] ?? '')) === $this->currency();
 
         if (! $matches) {
@@ -221,11 +221,20 @@ class StripeCheckout
     }
 
     /**
+     * What Checkout charges for the order: each line's unit price in minor units, times its quantity, as sent in
+     * createSession.
+     */
+    private function chargedAmount(Order $order): int
+    {
+        return (int) $order->items()->get()->sum(fn ($item): int => $this->minorUnits($item->unit_price) * (int) $item->qty);
+    }
+
+    /**
      * Stripe amounts are in the currency's smallest unit: cents for most, whole units for zero-decimal currencies.
      */
     private function minorUnits(float|int|string|null $amount): int
     {
-        $zeroDecimal = ['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf'];
+        $zeroDecimal = ['bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga', 'pyg', 'rwf', 'vnd', 'vuv', 'xaf', 'xof', 'xpf'];
 
         return (int) round((float) $amount * (in_array($this->currency(), $zeroDecimal, true) ? 1 : 100));
     }

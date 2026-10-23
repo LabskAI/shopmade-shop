@@ -167,3 +167,44 @@ it('escapes the product name in the page title and headings', function () {
         ->assertOk()
         ->assertDontSee('<script>alert(1)</script>', false);
 });
+
+it('refuses to cancel when a new payment page was opened during the cancel', function () {
+    stripeKeys();
+    $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 3, 'active' => true, 'price' => 40]);
+    $order = payableOrder(['stripe_session_id' => 'cs_open']);
+    $order->items()->update(['product_id' => $product->id]);
+    Http::fake(function (Request $request) use ($order) {
+        if (str_ends_with($request->url(), '/expire')) {
+            Order::query()->whereKey($order->id)->update(['stripe_session_id' => 'cs_new']);
+
+            return Http::response(['id' => 'cs_open', 'status' => 'expired']);
+        }
+
+        return Http::response(['id' => 'cs_open', 'status' => 'open']);
+    });
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
+        ->assertSessionHas('status', 'The buyer opened a new payment page while you were cancelling. Try again.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::New)->and($product->fresh()->stock)->toBe(3);
+});
+
+it('refuses to cancel a fulfilled order without touching Stripe', function () {
+    stripeKeys();
+    Http::fake();
+    $order = payableOrder(['status' => OrderStatus::Fulfilled, 'stripe_session_id' => 'cs_done']);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
+        ->assertSessionHas('status', 'Only an unpaid order can be cancelled.');
+
+    Http::assertNothingSent();
+    expect($order->fresh()->status)->toBe(OrderStatus::Fulfilled);
+});
+
+it('forbids view-only users from changing order status', function (string $route) {
+    $order = payableOrder();
+
+    $this->actingAs(User::factory()->user()->create())->post(route($route, $order))->assertForbidden();
+
+    expect($order->fresh()->status)->toBe(OrderStatus::New);
+})->with(['orders.mark-paid', 'orders.mark-fulfilled', 'orders.mark-cancelled']);
