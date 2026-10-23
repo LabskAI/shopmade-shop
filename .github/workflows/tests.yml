@@ -1,0 +1,64 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The package runs inside a Shopmade core install. Core is a private repo, so checking it out needs a token with
+# read access in the SHOPMADE_CORE_TOKEN secret. Without it only the syntax check runs and the job says so.
+jobs:
+  pest:
+    runs-on: ubuntu-latest
+
+    env:
+      CORE_TOKEN: ${{ secrets.SHOPMADE_CORE_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: package
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_sqlite, intl, zip, bcmath, gd, exif
+          coverage: none
+
+      - name: Syntax check
+        run: find package/src package/config package/database package/routes package/tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+
+      - name: Note a missing core token
+        if: env.CORE_TOKEN == ''
+        run: echo "::warning::SHOPMADE_CORE_TOKEN is not set, so the package tests did not run against core."
+
+      - uses: actions/checkout@v4
+        if: env.CORE_TOKEN != ''
+        with:
+          repository: LabskAI/shopmade-core
+          ref: ${{ vars.SHOPMADE_CORE_REF || 'main' }}
+          token: ${{ env.CORE_TOKEN }}
+          path: core
+
+      - name: Install core with this package
+        if: env.CORE_TOKEN != ''
+        working-directory: core
+        run: |
+          composer config repositories.package '{"type":"path","url":"../package","options":{"symlink":false}}'
+          composer require "labskai/shopmade-shop:*@dev" --no-interaction --no-progress
+          cp .env.example .env && php artisan key:generate
+
+      - name: Package tests
+        if: env.CORE_TOKEN != ''
+        working-directory: core
+        run: vendor/bin/pest vendor/labskai/shopmade-shop/tests
+
+      - name: Core tests with the package installed
+        if: env.CORE_TOKEN != ''
+        working-directory: core
+        run: php artisan test --compact
+
+      - name: Style
+        if: env.CORE_TOKEN != ''
+        working-directory: core
+        run: vendor/bin/pint --test ../package
