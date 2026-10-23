@@ -79,6 +79,7 @@ it('fulfils only the order named by the session on return', function () {
 });
 
 it('lets staff mark only a new order paid, and puts stock back on cancel', function () {
+    config(['shop.stripe.key' => null, 'shop.stripe.secret' => null]);
     $admin = User::factory()->admin()->create();
     $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 5, 'active' => true, 'price' => 10]);
     $order = Order::factory()->create(['status' => OrderStatus::New]);
@@ -101,4 +102,68 @@ it('refuses checkout when stock runs out and creates no order', function () {
     ])->assertSessionHasErrors('cart');
 
     expect(Order::query()->count())->toBe(0)->and($product->fresh()->stock)->toBe(1);
+});
+
+it('closes the open Stripe session on cancel, so a later payment is not recorded', function () {
+    stripeKeys();
+    config(['shop.stripe.webhook_secret' => 'whsec_test']);
+    $order = payableOrder(['stripe_session_id' => 'cs_open']);
+    Http::fake([
+        'api.stripe.com/v1/checkout/sessions/cs_open/expire' => Http::response(['id' => 'cs_open', 'status' => 'expired']),
+        'api.stripe.com/v1/checkout/sessions/cs_open' => Http::response(['id' => 'cs_open', 'status' => 'open']),
+    ]);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order));
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Cancelled);
+    Http::assertSent(fn (Request $request) => str_ends_with($request->url(), '/cs_open/expire'));
+
+    $payload = json_encode(['type' => 'checkout.session.completed', 'data' => ['object' => [
+        'id' => 'cs_open', 'payment_status' => 'paid', 'amount_total' => 4000, 'currency' => 'usd',
+        'client_reference_id' => (string) $order->id, 'metadata' => ['order_id' => (string) $order->id],
+    ]]]);
+    $timestamp = time();
+    $signature = hash_hmac('sha256', $timestamp.'.'.$payload, 'whsec_test');
+
+    $this->call('POST', route('stripe.webhook'), [], [], [], ['CONTENT_TYPE' => 'application/json', 'HTTP_STRIPE_SIGNATURE' => "t={$timestamp},v1={$signature}"], $payload)
+        ->assertOk()->assertSee('Ignored');
+    expect($order->fresh()->status)->toBe(OrderStatus::Cancelled);
+});
+
+it('records the payment instead of cancelling when the buyer already paid', function () {
+    stripeKeys();
+    $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 3, 'active' => true, 'price' => 40]);
+    $order = payableOrder(['stripe_session_id' => 'cs_done']);
+    $order->items()->update(['product_id' => $product->id]);
+    Http::fake(['api.stripe.com/*' => Http::response([
+        'id' => 'cs_done', 'status' => 'complete', 'payment_status' => 'paid', 'amount_total' => 4000, 'currency' => 'usd',
+        'client_reference_id' => (string) $order->id, 'metadata' => ['order_id' => (string) $order->id],
+    ])]);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
+        ->assertSessionHas('status', 'The buyer has already paid, so the order was not cancelled.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid)->and($product->fresh()->stock)->toBe(3);
+});
+
+it('refuses to cancel a paid order', function () {
+    $order = payableOrder(['status' => OrderStatus::Paid, 'paid_at' => now()]);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
+        ->assertSessionHas('status', 'This order is paid. Refund it in Stripe before cancelling it.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid);
+});
+
+it('escapes the product name in the page title and headings', function () {
+    $product = Product::factory()->create(['name' => '<script>alert(1)</script>', 'slug' => 'xss', 'active' => true]);
+
+    $this->get(route('shop.show', $product))
+        ->assertOk()
+        ->assertDontSee('<script>alert(1)</script>', false)
+        ->assertSee('&lt;script&gt;alert(1)&lt;/script&gt;', false);
+
+    $this->actingAs(User::factory()->admin()->create())->get(route('products.show', $product))
+        ->assertOk()
+        ->assertDontSee('<script>alert(1)</script>', false);
 });

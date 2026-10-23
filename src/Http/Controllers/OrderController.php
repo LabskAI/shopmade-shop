@@ -3,11 +3,14 @@
 namespace Shopmade\Shop\Http\Controllers;
 
 use App\Http\Controllers\Controller;
+use Illuminate\Http\Client\HttpClientException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
+use RuntimeException;
 use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Models\Order;
+use Shopmade\Shop\Services\StripeCheckout;
 
 class OrderController extends Controller
 {
@@ -47,10 +50,29 @@ class OrderController extends Controller
         return redirect()->route('orders.show', $order)->with('status', $done ? 'Order marked fulfilled.' : 'Only a new or paid order can be fulfilled.');
     }
 
-    public function markCancelled(Order $order): RedirectResponse
+    /**
+     * Closes the order's Stripe payment page first, so a cancelled order can't be paid afterwards.
+     */
+    public function markCancelled(Order $order, StripeCheckout $stripe): RedirectResponse
     {
+        if ($order->status === OrderStatus::Paid) {
+            return redirect()->route('orders.show', $order)->with('status', 'This order is paid. Refund it in Stripe before cancelling it.');
+        }
+
+        try {
+            $closed = $stripe->closeSession($order);
+        } catch (HttpClientException|RuntimeException $exception) {
+            report($exception);
+
+            return redirect()->route('orders.show', $order)->with('status', 'Could not close the Stripe payment page, so the order was not cancelled. Try again.');
+        }
+
+        if (! $closed) {
+            return redirect()->route('orders.show', $order)->with('status', 'The buyer has already paid, so the order was not cancelled.');
+        }
+
         $done = $order->markCancelled();
 
-        return redirect()->route('orders.show', $order)->with('status', $done ? 'Order cancelled. Its stock was put back.' : 'This order is already closed.');
+        return redirect()->route('orders.show', $order)->with('status', $done ? 'Order cancelled. Its stock was put back.' : 'Only an unpaid order can be cancelled.');
     }
 }

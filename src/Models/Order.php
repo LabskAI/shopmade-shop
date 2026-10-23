@@ -70,8 +70,9 @@ class Order extends Model
     }
 
     /**
-     * Moves a new order to paid, under a row lock. A payment for an order that is already paid (or was cancelled or
-     * fulfilled) is not treated as success: it is logged for a refund and false is returned.
+     * Moves a new order to paid, under a row lock. A fulfilled order that was never paid keeps its status and gets
+     * its paid_at. A payment for a cancelled order (or a second payment) is not treated as success: it is logged for
+     * a refund and false is returned.
      */
     public function markPaid(?string $stripeSessionId = null): bool
     {
@@ -79,6 +80,16 @@ class Order extends Model
             $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
             if ($order->status === OrderStatus::Paid && ($stripeSessionId === null || $stripeSessionId === $order->stripe_session_id)) {
+                return true;
+            }
+
+            if ($order->status === OrderStatus::Fulfilled && $order->paid_at === null) {
+                $order->forceFill([
+                    'paid_at' => now(),
+                    'stripe_session_id' => $stripeSessionId ?? $order->stripe_session_id,
+                ])->save();
+                $this->setRawAttributes($order->getAttributes(), true);
+
                 return true;
             }
 
@@ -107,24 +118,30 @@ class Order extends Model
 
     public function markFulfilled(): bool
     {
-        if ($this->status !== OrderStatus::Paid && $this->status !== OrderStatus::New) {
-            return false;
-        }
+        return DB::transaction(function (): bool {
+            $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
-        $this->forceFill(['status' => OrderStatus::Fulfilled])->save();
+            if ($order->status !== OrderStatus::Paid && $order->status !== OrderStatus::New) {
+                return false;
+            }
 
-        return true;
+            $order->forceFill(['status' => OrderStatus::Fulfilled])->save();
+            $this->setRawAttributes($order->getAttributes(), true);
+
+            return true;
+        });
     }
 
     /**
-     * Cancels a new or paid order and puts its stock back.
+     * Cancels an unpaid order and puts its stock back. A paid order is refused: refund it in Stripe first. Close any
+     * open Checkout Session (StripeCheckout::closeSession) before calling this, so the buyer can't pay afterwards.
      */
     public function markCancelled(): bool
     {
         return DB::transaction(function (): bool {
             $order = self::query()->lockForUpdate()->findOrFail($this->id);
 
-            if ($order->status === OrderStatus::Cancelled || $order->status === OrderStatus::Fulfilled) {
+            if ($order->status !== OrderStatus::New) {
                 return false;
             }
 

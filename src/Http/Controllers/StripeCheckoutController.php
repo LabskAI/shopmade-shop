@@ -3,7 +3,7 @@
 namespace Shopmade\Shop\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\Client\HttpClientException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Shopmade\Shop\Models\Order;
@@ -24,7 +24,7 @@ class StripeCheckoutController extends Controller
 
         try {
             $checkoutUrl = $stripe->createSession($order);
-        } catch (RequestException) {
+        } catch (HttpClientException) {
             return redirect($order->publicUrl())->with('status', 'Could not start payment. Try again or pay later.');
         }
 
@@ -47,7 +47,7 @@ class StripeCheckoutController extends Controller
 
         try {
             $stripe->handleCompletedSession($sessionId, $order);
-        } catch (RequestException) {
+        } catch (HttpClientException) {
             return redirect($order->publicUrl())->with('status', 'We could not confirm the payment yet. It will show here once Stripe confirms it.');
         }
 

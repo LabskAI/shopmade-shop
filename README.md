@@ -25,7 +25,7 @@ Without keys, checkout saves the order for pay-later and staff mark it paid. To 
 ```dotenv
 STRIPE_KEY=pk_live_...
 STRIPE_SECRET=sk_live_...
-STRIPE_WEBHOOK_SECRET=whsec_...   # endpoint: https://your-site/stripe/webhook, event checkout.session.completed
+STRIPE_WEBHOOK_SECRET=whsec_...   # endpoint: https://your-site/stripe/webhook, events checkout.session.completed and checkout.session.async_payment_succeeded
 STRIPE_CURRENCY=usd
 ```
 

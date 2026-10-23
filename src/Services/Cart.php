@@ -60,7 +60,7 @@ class Cart
 
     public function count(): int
     {
-        return (int) array_sum($this->items());
+        return (int) $this->lines()->sum('qty');
     }
 
     public function total(): float

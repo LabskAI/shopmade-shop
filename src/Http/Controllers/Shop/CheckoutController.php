@@ -61,6 +61,10 @@ class CheckoutController extends Controller
 
         $lines = $cart->lines();
 
+        if ($lines->isEmpty()) {
+            return redirect()->route('shop.index')->with('status', 'Your cart is empty.');
+        }
+
         try {
             $order = $this->placeOrder($data, $lines, $cart->total());
         } catch (OutOfStock $exception) {

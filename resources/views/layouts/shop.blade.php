@@ -5,8 +5,8 @@
 --}}
 @php
     $cartCount = app(\Shopmade\Shop\Services\Cart::class)->count();
-    $title = trim($__env->yieldContent('title', 'Shop')).' · '.$name;
-    $description = trim($__env->yieldContent('description')) ?: $description;
+    $title = html_entity_decode(trim($__env->yieldContent('title', 'Shop')), ENT_QUOTES).' · '.$name;
+    $description = html_entity_decode(trim($__env->yieldContent('description')), ENT_QUOTES) ?: $description;
 @endphp
 
 @extends('front.layout')

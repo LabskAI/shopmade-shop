@@ -3,7 +3,7 @@
 namespace Shopmade\Shop\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\Client\HttpClientException;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Shopmade\Shop\Services\StripeCheckout;
@@ -20,7 +20,7 @@ class StripeWebhookController extends Controller
 
         try {
             $handled = $stripe->handleWebhookPayload($request->json()->all(), $signed);
-        } catch (RequestException $exception) {
+        } catch (HttpClientException $exception) {
             report($exception);
 
             return response('Stripe lookup failed', 500);
