@@ -1,0 +1,24 @@
+{
+    "name": "labskai/shopmade-shop",
+    "description": "Products, cart, guest checkout with optional Stripe, and orders for Shopmade.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.4",
+        "laravel/framework": "^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Shopmade\\Shop\\": "src/",
+            "Shopmade\\Shop\\Database\\Factories\\": "database/factories/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Shopmade\\Shop\\ShopServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable"
+}
