@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\View\View;
 use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Models\Order;
+use Shopmade\Shop\Services\PaymentMismatch;
 use Shopmade\Shop\Services\SessionStillOpen;
 use Shopmade\Shop\Services\StripeCheckout;
 
@@ -63,6 +64,11 @@ class OrderController extends Controller
             report($exception);
 
             return $this->back($order, 'Stripe did not answer, so the order is held unpaid and can\'t be paid online meanwhile. Try again in a minute.');
+        } catch (PaymentMismatch $exception) {
+            report($exception);
+            $order->releaseOfflineSettlement($claim['token']);
+
+            return $this->back($order, 'Stripe has a card payment for this order that doesn\'t match it, so nothing was recorded. Check the refund log and Stripe before marking it paid.');
         }
 
         if ($closed && $order->markPaidByStaff($claim['token'], $claim['session'])) {
@@ -124,6 +130,10 @@ class OrderController extends Controller
             report($exception);
 
             return redirect()->route('orders.show', $order)->with('status', 'Could not close the Stripe payment page, so the order was not cancelled. Try again.');
+        } catch (PaymentMismatch $exception) {
+            report($exception);
+
+            return $this->back($order, 'Stripe has a card payment for this order that doesn\'t match it, so the order was not cancelled. Check the refund log and Stripe.');
         }
 
         if (! $closed) {
@@ -131,6 +141,10 @@ class OrderController extends Controller
         }
 
         $done = $order->markCancelled($closedSessionId);
+
+        if (! $done && $order->fresh()->hasFreshOfflineSettlement()) {
+            return $this->back($order, 'This order is being marked paid right now, so it was not cancelled. Reload it in a minute.');
+        }
 
         if (! $done && $order->fresh()->status === OrderStatus::New) {
             return redirect()->route('orders.show', $order)->with('status', 'The buyer opened a new payment page while you were cancelling. Try again.');

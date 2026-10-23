@@ -41,7 +41,12 @@ class StripeCheckoutController extends Controller
     public function return(Request $request, StripeCheckout $stripe): RedirectResponse
     {
         $sessionId = $request->string('session_id')->toString();
-        $order = $sessionId !== '' ? Order::query()->where('stripe_session_id', $sessionId)->first() : null;
+
+        try {
+            $order = $sessionId !== '' ? $stripe->orderForReturn($sessionId) : null;
+        } catch (HttpClientException) {
+            return redirect()->route('shop.index')->with('status', 'We could not confirm the payment yet. Check your email for the order link.');
+        }
 
         abort_if($order === null, 404);
 

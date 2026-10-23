@@ -5,6 +5,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Shopmade\Shop\Enums\OrderStatus;
 use Shopmade\Shop\Enums\ProductType;
@@ -345,4 +346,71 @@ it('rolls back and reapplies the offline settlement migration', function () {
 
     $migration->up();
     expect(Schema::hasColumns('orders', ['offline_settlement_at', 'offline_settlement_token']))->toBeTrue();
+});
+
+it('refuses a staff cancel when a mark paid claims the order during the Stripe call', function () {
+    stripeKeys();
+    $product = Product::factory()->create(['type' => ProductType::Physical, 'stock' => 3, 'active' => true, 'price' => 40]);
+    $order = payableOrder(['stripe_session_id' => 'cs_open']);
+    $order->items()->update(['product_id' => $product->id]);
+
+    Http::fake(function (Request $request) use ($order) {
+        if (str_ends_with($request->url(), '/expire')) {
+            $order->claimOfflineSettlement();
+
+            return Http::response(['id' => 'cs_open', 'status' => 'expired']);
+        }
+
+        return Http::response(['id' => 'cs_open', 'status' => 'open']);
+    });
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-cancelled', $order))
+        ->assertSessionHas('status', 'This order is being marked paid right now, so it was not cancelled. Reload it in a minute.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::New)->and($product->fresh()->stock)->toBe(3);
+});
+
+it('logs a late card payment for refund after staff mark the order paid, and still returns the buyer to it', function () {
+    stripeKeys();
+    $order = payableOrder(['stripe_session_id' => 'cs_old']);
+    $paidSession = [
+        'id' => 'cs_old', 'status' => 'complete', 'payment_status' => 'paid', 'amount_total' => 4000, 'currency' => 'usd',
+        'client_reference_id' => (string) $order->id, 'metadata' => ['order_id' => (string) $order->id],
+    ];
+    $expired = false;
+    Http::fake(function (Request $request) use (&$expired, $paidSession) {
+        if (str_ends_with($request->url(), '/expire')) {
+            $expired = true;
+
+            return Http::response(['id' => 'cs_old', 'status' => 'expired']);
+        }
+
+        return Http::response($expired ? $paidSession : ['id' => 'cs_old', 'status' => 'open']);
+    });
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'Order marked paid.');
+
+    Log::spy();
+    app(StripeCheckout::class)->handleWebhookPayload(['type' => 'checkout.session.completed', 'data' => ['object' => $paidSession]], signed: true);
+
+    Log::shouldHaveReceived('error')->withArgs(fn (string $message, array $context) => str_contains($message, 'refund it in Stripe')
+        && $context['order'] === $order->number && $context['session_id'] === 'cs_old' && $context['amount_total'] === 4000);
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid)->and($order->fresh()->stripe_session_id)->toBeNull();
+
+    $this->get(route('shop.stripe.return', ['session_id' => 'cs_old']))->assertRedirect($order->publicUrl());
+});
+
+it('tells staff when Stripe holds a payment that does not match the order', function () {
+    stripeKeys();
+    $order = payableOrder(['stripe_session_id' => 'cs_done']);
+    Http::fake(['api.stripe.com/*' => Http::response([
+        'id' => 'cs_done', 'status' => 'complete', 'payment_status' => 'paid', 'amount_total' => 100, 'currency' => 'usd',
+        'client_reference_id' => (string) $order->id, 'metadata' => ['order_id' => (string) $order->id],
+    ])]);
+
+    $this->actingAs(User::factory()->admin()->create())->post(route('orders.mark-paid', $order))
+        ->assertSessionHas('status', 'Stripe has a card payment for this order that doesn\'t match it, so nothing was recorded. Check the refund log and Stripe before marking it paid.');
+
+    expect($order->fresh()->status)->toBe(OrderStatus::New)->and($order->fresh()->offline_settlement_at)->toBeNull();
 });

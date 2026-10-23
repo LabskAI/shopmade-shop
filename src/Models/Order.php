@@ -90,6 +90,8 @@ class Order extends Model
                 $order->forceFill([
                     'paid_at' => now(),
                     'stripe_session_id' => $stripeSessionId ?? $order->stripe_session_id,
+                    'offline_settlement_at' => null,
+                    'offline_settlement_token' => null,
                 ])->save();
                 $this->setRawAttributes($order->getAttributes(), true);
 
@@ -227,7 +229,8 @@ class Order extends Model
      * Cancels an unpaid order and puts its stock back. A paid order is refused: refund it in Stripe first. Close any
      * open Checkout Session (StripeCheckout::closeSession) before calling this and pass the id that was closed: if
      * another session was saved meanwhile, the cancel is refused so that session can be closed too. $abandoned is
-     * for an expired-session event: it never cancels an order staff are settling offline.
+     * for an expired-session event: it never cancels an order staff are settling offline. No caller cancels while a
+     * mark paid holds a fresh claim.
      */
     public function markCancelled(?string $closedSessionId = null, bool $abandoned = false): bool
     {
@@ -238,7 +241,7 @@ class Order extends Model
                 return false;
             }
 
-            if ($abandoned && $order->offline_settlement_at !== null) {
+            if ($order->hasFreshOfflineSettlement() || ($abandoned && $order->offline_settlement_at !== null)) {
                 return false;
             }
 

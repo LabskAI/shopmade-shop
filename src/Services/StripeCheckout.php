@@ -41,7 +41,7 @@ class StripeCheckout
             $existing = $this->session($previousSessionId);
 
             if (($existing['status'] ?? null) === 'open' && filled($existing['url'] ?? null)) {
-                return $existing['url'];
+                return $this->stillPayable($order, $previousSessionId) ? $existing['url'] : null;
             }
 
             if (($existing['status'] ?? null) === 'complete') {
@@ -106,6 +106,7 @@ class StripeCheckout
      * already paid: the payment is recorded and the order must not be cancelled.
      *
      * @throws SessionStillOpen when Stripe confirms the session is still open
+     * @throws PaymentMismatch when the session was paid but doesn't match the order (logged for a refund)
      * @throws HttpClientException when Stripe's answer is unknown
      */
     public function closeSession(Order $order): bool
@@ -129,7 +130,9 @@ class StripeCheckout
         }
 
         if (($session['status'] ?? null) === 'complete') {
-            $this->fulfil($session, $order);
+            if (! $this->fulfil($session, $order) && ($session['payment_status'] ?? null) === 'paid' && $order->fresh()->status === OrderStatus::New) {
+                throw new PaymentMismatch('Stripe holds a payment for order '.$order->number.' that does not match it.');
+            }
 
             return false;
         }
@@ -149,6 +152,45 @@ class StripeCheckout
     public function handleCompletedSession(string $sessionId, ?Order $expected = null): bool
     {
         return $this->fulfil($this->session($sessionId), $expected);
+    }
+
+    /**
+     * The order a Checkout success_url returns to: the one holding the session, or, once staff settled it offline and
+     * dropped the session, the order Stripe's metadata and client_reference_id both name.
+     *
+     * @throws HttpClientException
+     */
+    public function orderForReturn(string $sessionId): ?Order
+    {
+        $order = Order::query()->where('stripe_session_id', $sessionId)->first();
+
+        if ($order !== null || ! $this->isConfigured()) {
+            return $order;
+        }
+
+        $session = $this->session($sessionId);
+        $orderId = (string) ($session['metadata']['order_id'] ?? '');
+
+        if ($orderId === '' || (string) ($session['client_reference_id'] ?? '') !== $orderId) {
+            return null;
+        }
+
+        return Order::query()->find($orderId);
+    }
+
+    /**
+     * Re-reads the order under a lock: an open payment page is only handed out while the order is still new, nobody
+     * is settling it offline, and it still holds that session.
+     */
+    private function stillPayable(Order $order, string $sessionId): bool
+    {
+        return DB::transaction(function () use ($order, $sessionId): bool {
+            $locked = Order::query()->lockForUpdate()->findOrFail($order->id);
+
+            return $locked->status === OrderStatus::New
+                && $locked->offline_settlement_at === null
+                && $locked->stripe_session_id === $sessionId;
+        });
     }
 
     /**
@@ -189,6 +231,17 @@ class StripeCheckout
         $order = Order::query()->find($session['metadata']['order_id'] ?? null);
 
         if ($order === null || ($expected !== null && ! $order->is($expected))) {
+            return false;
+        }
+
+        if (filled($session['id'] ?? null) && $session['id'] !== $order->stripe_session_id) {
+            Log::error('Card payment for a Checkout session the order no longer uses; refund it in Stripe.', [
+                'order' => $order->number,
+                'session_id' => $session['id'],
+                'amount_total' => $session['amount_total'] ?? null,
+                'currency' => $session['currency'] ?? null,
+            ]);
+
             return false;
         }
 
