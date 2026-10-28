@@ -141,3 +141,10 @@ it('lets a user view orders but not manage products', function () {
         ->get(route('products.create'))
         ->assertForbidden();
 });
+
+it('shows the new product form to an admin', function () {
+    $this->actingAs(User::factory()->admin()->create())
+        ->get(route('products.create'))
+        ->assertOk()
+        ->assertSee('New product');
+});

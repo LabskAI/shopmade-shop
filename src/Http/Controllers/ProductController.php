@@ -33,6 +33,7 @@ class ProductController extends Controller
     public function create(): View
     {
         return view('shop::products.create', [
+            'product' => null,
             'types' => ProductType::cases(),
         ]);
     }
