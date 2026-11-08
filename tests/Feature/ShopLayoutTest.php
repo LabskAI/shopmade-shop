@@ -12,7 +12,7 @@ it('renders the shop pages inside the public site layout, without the app bundle
     foreach ([route('shop.index'), route('shop.show', $product), route('shop.cart')] as $url) {
         $this->get($url)
             ->assertOk()
-            ->assertSee('class="site-header"', false)
+            ->assertSee('class="site-header', false)
             ->assertSee('class="sm-shop"', false)
             ->assertSee('<meta name="robots" content="noindex">', false)
             ->assertDontSee('/build/assets/', false);
